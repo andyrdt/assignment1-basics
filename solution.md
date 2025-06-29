@@ -82,5 +82,22 @@ UnicodeDecodeError: 'utf-8' codec can't decode byte 0x80 in position 0: invalid 
 
 UTF-8 encodes one byte sequences with `0xxxxxxx` (binary representation), and two byte sequences with `110xxxxx 10xxxxxx`. Since 128 corresponds to `10000000`, it cannot be a one byte sequence, nor the start of a two-byte sequence.
 
+## 2.5
+
+BPE Training on TinyStories
+
+a)
+
+The pre-tokenization takes about 2.25 minutes with a peak memory usage of ~2GB. The merging takes about 1 minute with a peak memory usage of ~53MB. Note that the merging can be further optimized by using a more efficient datastructure (heap). The longest token is `' responsibility'`, which has a length of 15 characters.
+
+
+BPE Training on OpenWebText
+
+a)
+
+The pre-tokenization takes about 16 minutes. I'm using 8 total workers, running 4 at a time (I was encountering OOM issues when processing the whole dataset at once).
+
+
+b) 
 
 
