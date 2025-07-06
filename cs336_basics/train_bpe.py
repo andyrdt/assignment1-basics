@@ -1,3 +1,4 @@
+import codecs
 import os
 from typing import BinaryIO
 from typing_extensions import Set
@@ -11,6 +12,7 @@ from multiprocessing import Pool
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 INITIAL_VOCAB_SIZE = 2**8
 SPLIT_SPECIAL_TOKEN = "<|endoftext|>".encode("utf-8")
+WORKER_CHUNK_SIZE = 1 << 20  # 1MB
 
 tqdm.tqdm.set_lock(mp.RLock())
 
@@ -68,41 +70,64 @@ def _pre_tokenize_worker(
     special_tokens: list[str],
     start: int,
     end: int,
+    chunk_size: int = WORKER_CHUNK_SIZE,
 ) -> dict[tuple[bytes, ...], int]:
-    with open(input_path, "rb") as f:
-        f.seek(start)
-        chunk = f.read(end - start).decode("utf-8", errors="ignore")
-    
-    # split by special tokens
-    escaped_special_tokens = [re.escape(special_token) for special_token in special_tokens]
-    documents = re.split("|".join(escaped_special_tokens), chunk)
 
+    splitter = re.compile("|".join(map(re.escape, special_tokens)))
+    incremental_decoder = codecs.getincrementaldecoder("utf-8")()
     pre_tokenized_document: dict[tuple[bytes, ...], int] = defaultdict(int)
 
-    for document in tqdm.tqdm(
-        documents,
-        position=worker_indx,
-        desc=f"worker {worker_indx}",
-        leave=False,
-    ):
-        for match in re.finditer(PAT, document):
-            token = match.group()
-            token_encoded = token.encode("utf-8")
-            token_encoded = tuple([bytes([b]) for b in token_encoded])
-            pre_tokenized_document[token_encoded] += 1
-    
-    return pre_tokenized_document
+    with open(input_path, "rb") as f:
+        to_read = end - start
+        f.seek(start)
 
+        carry = ""
+
+        with tqdm.tqdm(
+            total=to_read,
+            position=worker_indx,
+            desc=f"worker {worker_indx}",
+            leave=False,
+        ) as pbar:
+            while to_read > 0:
+                chunk = f.read(min(chunk_size, to_read))
+                to_read -= len(chunk)
+                pbar.update(len(chunk))
+
+                decoded_chunk = incremental_decoder.decode(chunk)
+                decoded_chunk = carry + decoded_chunk
+
+                *docs, carry = splitter.split(decoded_chunk)
+
+                for doc in docs:
+                    for match in re.finditer(PAT, doc):
+                        token = match.group()
+                        token_encoded = token.encode("utf-8")
+                        token_encoded = tuple([bytes([b]) for b in token_encoded])
+                        pre_tokenized_document[token_encoded] += 1 
+
+        leftover = incremental_decoder.decode(bytes(), final=True)
+        if leftover:
+            tail_doc = carry + leftover
+        else:
+            tail_doc = carry
+        
+        if tail_doc:
+            for match in re.finditer(PAT, tail_doc):
+                token = match.group()
+                token_encoded = tuple(bytes([b]) for b in token.encode("utf-8"))
+                pre_tokenized_document[token_encoded] += 1
+
+    return pre_tokenized_document
 
 def _pre_tokenize(
     input_path: str | os.PathLike,
     special_tokens: list[str],
     num_processes: int,
-    num_splits: int,
 ) -> dict[tuple[bytes, ...], int]:
 
     with open(input_path, "rb") as f:
-        boundaries = find_chunk_boundaries(f, num_splits, SPLIT_SPECIAL_TOKEN)
+        boundaries = find_chunk_boundaries(f, num_processes, SPLIT_SPECIAL_TOKEN)
 
     ranges = [(boundaries[i], boundaries[i+1]) for i in range(len(boundaries)-1)]
 
@@ -152,7 +177,6 @@ def train_bpe(
         input_path,
         special_tokens,
         num_processes=num_processes,
-        num_splits=num_splits,
     )
     log_print(f"Done pre-tokenizing documents.")
     

@@ -11,7 +11,7 @@ vocab, merges = train_bpe(
     input_path,
     vocab_size,
     special_tokens,
-    num_processes=4,
+    num_processes=8,
     num_splits=8,
 )
 
