@@ -1,5 +1,6 @@
 import codecs
 import os
+import heapq
 from typing import BinaryIO
 from typing_extensions import Set
 import regex as re
@@ -13,8 +14,6 @@ PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s
 INITIAL_VOCAB_SIZE = 2**8
 SPLIT_SPECIAL_TOKEN = "<|endoftext|>".encode("utf-8")
 WORKER_CHUNK_SIZE = 1 << 20  # 1MB
-
-tqdm.tqdm.set_lock(mp.RLock())
 
 def find_chunk_boundaries(
     file: BinaryIO, 
@@ -75,7 +74,7 @@ def _pre_tokenize_worker(
 
     splitter = re.compile("|".join(map(re.escape, special_tokens)))
     incremental_decoder = codecs.getincrementaldecoder("utf-8")()
-    pre_tokenized_document: dict[tuple[bytes, ...], int] = defaultdict(int)
+    counts: dict[tuple[bytes, ...], int] = defaultdict(int)
 
     with open(input_path, "rb") as f:
         to_read = end - start
@@ -101,10 +100,9 @@ def _pre_tokenize_worker(
 
                 for doc in docs:
                     for match in re.finditer(PAT, doc):
-                        token = match.group()
-                        token_encoded = token.encode("utf-8")
-                        token_encoded = tuple([bytes([b]) for b in token_encoded])
-                        pre_tokenized_document[token_encoded] += 1 
+                        token_encoded = match.group().encode("utf-8")
+                        token_key = tuple([bytes([b]) for b in token_encoded])
+                        counts[token_key] += 1 
 
         leftover = incremental_decoder.decode(bytes(), final=True)
         if leftover:
@@ -114,18 +112,17 @@ def _pre_tokenize_worker(
         
         if tail_doc:
             for match in re.finditer(PAT, tail_doc):
-                token = match.group()
-                token_encoded = tuple(bytes([b]) for b in token.encode("utf-8"))
-                pre_tokenized_document[token_encoded] += 1
+                token_encoded = match.group().encode("utf-8")
+                token_key = tuple(bytes([b]) for b in token_encoded)
+                counts[token_key] += 1
 
-    return pre_tokenized_document
+    return counts
 
 def _pre_tokenize(
     input_path: str | os.PathLike,
     special_tokens: list[str],
     num_processes: int,
 ) -> dict[tuple[bytes, ...], int]:
-
     with open(input_path, "rb") as f:
         boundaries = find_chunk_boundaries(f, num_processes, SPLIT_SPECIAL_TOKEN)
 
@@ -140,14 +137,100 @@ def _pre_tokenize(
         pre_tokenized_subdocuments = pool.starmap(_pre_tokenize_worker, pre_tokenize_worker_args)
     
     # aggregate results
-    pre_tokenized_document: dict[tuple[bytes, ...], int] = defaultdict(int)
+    counts: dict[tuple[bytes, ...], int] = defaultdict(int)
     for pre_tokenized_subdocument in tqdm.tqdm(pre_tokenized_subdocuments):
         for key, value in pre_tokenized_subdocument.items():
-            pre_tokenized_document[key] += value
+            counts[key] += value
 
-    return pre_tokenized_document
+    return counts
 
+class BPEStats:
 
+    class _HeapItem:
+        def __init__(self, count: int, pair: tuple[bytes, bytes]):
+            self.count = count
+            self.pair = pair
+
+        def __lt__(self, other) -> bool:
+            if self.count != other.count:
+                return self.count > other.count # larger count wins
+            return self.pair > other.pair # larger pair wins on tie
+
+    def __init__(self, token_counts: dict[tuple[bytes, ...], int], max_num_merges: int):
+        self.token_counts: dict[tuple[bytes, ...], int] = token_counts
+        self.pair_counts: dict[tuple[bytes, bytes], int] = defaultdict(int)
+        self.pair_to_tokens: dict[tuple[bytes, bytes], tuple[bytes, ...]] = defaultdict(set)
+        self._build_initial_stats()
+        
+        self.max_num_merges = max_num_merges
+        self.heap: list[tuple[int, tuple[bytes, bytes], tuple[bytes, bytes]]] = []
+        self._build_initial_heap()
+    
+    def _build_initial_stats(self):
+        for token, count in self.token_counts.items():
+            for i in range(len(token) - 1):
+                pair = (token[i], token[i+1])
+                self.pair_counts[pair] += count
+                self.pair_to_tokens[pair].add(token)
+
+    def _build_initial_heap(self):
+        for pair, count in self.pair_counts.items():
+            heapq.heappush(self.heap, self._HeapItem(count, pair))
+    
+    def get_top_pair(self) -> tuple[bytes, bytes] | None:
+        while self.heap:
+            item = self.heap[0]
+            count, pair = item.count, item.pair
+            if count == self.pair_counts[pair] and self.pair_counts[pair] > 0:
+                # heap entry is not stale
+                return pair
+            else:
+                # heap entry is stale (we add heap entries lazily - see merge_pair)
+                # remove the entry, and continue until we hit a valid one
+                heapq.heappop(self.heap)
+        return None
+    
+    def merge_pair(self, pair: tuple[bytes, bytes]) -> None:
+
+        tokens_to_modify = self.pair_to_tokens[pair].copy()
+        touched = set()
+        previous_pair_counts = self.pair_counts.copy()
+
+        for idx, old_token in enumerate(tokens_to_modify):
+            count = self.token_counts.pop(old_token)
+
+            new_token = []
+            i = 0
+            while i < len(old_token):
+                if i+1 < len(old_token) and (old_token[i], old_token[i+1]) == pair:
+                    new_token.append(old_token[i] + old_token[i+1])
+                    i += 2
+                else:
+                    new_token.append(old_token[i])
+                    i += 1
+            new_token = tuple(new_token)
+            self.token_counts[new_token] += count
+
+            # remove old token contributions
+            for j in range(len(old_token) - 1):
+                old_pair = (old_token[j], old_token[j+1])
+                self.pair_counts[old_pair] -= count
+                self.pair_to_tokens[old_pair].discard(old_token)
+                touched.add(old_pair)
+
+            # add new token contributions
+            for j in range(len(new_token) - 1):
+                new_pair = (new_token[j], new_token[j+1])
+                self.pair_counts[new_pair] += count
+                self.pair_to_tokens[new_pair].add(new_token)
+                touched.add(new_pair)
+
+        for pair in touched:
+            updated_count = self.pair_counts[pair]
+            previous_count = previous_pair_counts[pair]
+            if updated_count != previous_count:
+                heapq.heappush(self.heap, self._HeapItem(updated_count, pair))
+            
 def train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
@@ -155,10 +238,7 @@ def train_bpe(
     **kwargs,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
 
-    log_print(f"Entered train_bpe.")
-
-    num_processes = kwargs.get("num_processes", 4)
-    num_splits = kwargs.get("num_splits", 8)
+    num_processes = kwargs.get("num_processes", 8)
 
     # initialize vocabulary
     vocab: dict[int, bytes] = {}
@@ -168,71 +248,23 @@ def train_bpe(
     for i in range(INITIAL_VOCAB_SIZE):
         vocab[offset + i] = bytes([i])
 
-    # initialize merges
     merges = []
+    merges_needed = vocab_size - len(vocab)
 
-    # now pre-tokenize each document
-    log_print(f"Pre-tokenizing documents...")
-    pre_tokenized_document = _pre_tokenize(
-        input_path,
-        special_tokens,
-        num_processes=num_processes,
-    )
-    log_print(f"Done pre-tokenizing documents.")
-    
-    log_print(f"Building initial byte pair dict...")
+    log_print("Pre-tokenizing...")    
+    token_counts = _pre_tokenize(input_path, special_tokens, num_processes)
+    log_print("Done pre-tokenizing.")
 
-    byte_pair_counts: dict[tuple[bytes, ...], int] = defaultdict(int)
-    byte_pair_to_token_cache: dict[tuple[bytes, bytes], set[tuple[bytes, ...]]] = defaultdict(set)
+    log_print("Constructing BPEStats")
+    stats = BPEStats(token_counts, merges_needed)
+    log_print("Done constructing BPEStats")
 
-    for key, value in pre_tokenized_document.items():
-        for i in range(len(key)-1):
-            byte_pair = (key[i], key[i+1])
-            byte_pair_counts[byte_pair] += value
-            byte_pair_to_token_cache[byte_pair].add(key)
-    
-    log_print(f"Done building initial byte pair dict.")
-    
-    num_merges_to_make = vocab_size - len(vocab)
-    for _ in tqdm.tqdm(range(num_merges_to_make)):
+    log_print("Merging pairs...")
+    for _ in tqdm.tqdm(range(merges_needed)):
+        top_pair = stats.get_top_pair()
+        vocab[len(vocab)] = top_pair[0] + top_pair[1]
+        merges.append(top_pair)
+        stats.merge_pair(top_pair)
+    log_print("Done merging pairs.")
 
-        top_byte_pair = None
-        for byte_pair, count in byte_pair_counts.items():
-            if (top_byte_pair is None or
-                count > byte_pair_counts[top_byte_pair] or
-                (count == byte_pair_counts[top_byte_pair] and byte_pair > top_byte_pair)):
-                top_byte_pair = byte_pair
-
-        # log_print(f"Done counting byte pairs.")
-        vocab[len(vocab)] = top_byte_pair[0] + top_byte_pair[1]
-        merges.append(top_byte_pair)
-
-        old_toks = byte_pair_to_token_cache[top_byte_pair].copy()
-        for old_tok in old_toks:
-            count = pre_tokenized_document[old_tok]
-
-            new_tok = []
-            i = 0
-            while i < len(old_tok):
-                if i+1 < len(old_tok) and (old_tok[i], old_tok[i+1]) == top_byte_pair:
-                    new_tok.append(old_tok[i] + old_tok[i+1])
-                    i += 2
-                else:
-                    new_tok.append(old_tok[i])
-                    i += 1
-            
-            pre_tokenized_document.pop(old_tok)
-            
-            for j in range(len(old_tok) - 1):
-                old_pair = (old_tok[j], old_tok[j+1])
-                byte_pair_counts[old_pair] -= count
-                byte_pair_to_token_cache[old_pair].discard(old_tok)
-
-            pre_tokenized_document[tuple(new_tok)] += count
-            for j in range(len(new_tok) - 1):
-                new_pair = (new_tok[j], new_tok[j+1])
-                byte_pair_counts[new_pair] += count
-                byte_pair_to_token_cache[new_pair].add(tuple(new_tok))
-
-    log_print(f"Exiting train_bpe.")
     return vocab, merges

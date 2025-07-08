@@ -88,16 +88,17 @@ BPE Training on TinyStories
 
 a)
 
-The pre-tokenization takes about 2.25 minutes with a peak memory usage of ~2GB. The merging takes about 1 minute with a peak memory usage of ~53MB. Note that the merging can be further optimized by using a more efficient datastructure (heap). The longest token is `' responsibility'`, which has a length of 15 characters.
+TODO
 
 
 BPE Training on OpenWebText
 
 a)
 
-The pre-tokenization takes about 16 minutes. I'm using 8 total workers, running 4 at a time (I was encountering OOM issues when processing the whole dataset at once).
-
+TODO
 
 b) 
+
+TODO
 
 

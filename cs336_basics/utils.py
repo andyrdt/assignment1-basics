@@ -12,7 +12,8 @@ from functools import partial
 #   "WARN"   – show only warnings & errors
 #   "ERROR"  – show only errors
 # ---------------------------------------------------------------------------
-LOG_LEVEL = "INFO"
+# LOG_LEVEL = "INFO"
+LOG_LEVEL = "ERROR"
 
 _LEVELS = {"DEBUG": 10, "INFO": 20, "WARN": 30, "ERROR": 40}
 
