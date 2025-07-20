@@ -422,7 +422,19 @@ def run_transformer_lm(
 
     from cs336_basics.transformer import TransformerLM
 
-    transformer_lm = TransformerLM(vocab_size, context_length, d_model, num_layers, num_heads, d_ff, rope_theta)
+    # set device to cuda if available
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    transformer_lm = TransformerLM(
+        d_model,
+        num_heads,
+        d_ff,
+        vocab_size,
+        context_length,
+        num_layers,
+        rope_theta,
+        device=device
+    )
     transformer_lm.load_state_dict(weights)
 
     return transformer_lm(in_indices)

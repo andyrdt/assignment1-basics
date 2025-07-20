@@ -283,7 +283,7 @@ class TransformerLM(torch.nn.Module):
         
         super().__init__()
 
-        self.embedding = Embedding(num_embeddings=vocab_size, embedding_dim=d_model, device=device, dtype=dtype)
+        self.token_embeddings = Embedding(num_embeddings=vocab_size, embedding_dim=d_model, device=device, dtype=dtype)
 
         d_k = d_model // num_heads
         self.rope = RotaryPositionalEmbedding(theta=rope_theta, d_k=d_k, max_seq_len=context_length, device=device)
@@ -302,7 +302,7 @@ class TransformerLM(torch.nn.Module):
 
         token_positions = torch.arange(token_ids.shape[-1])
 
-        x = self.embedding(token_ids)
+        x = self.token_embeddings(token_ids)
         for layer in self.layers:
             x = layer(x, token_positions)
         
