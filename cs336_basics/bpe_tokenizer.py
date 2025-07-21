@@ -17,6 +17,8 @@ class BPETokenizer:
         self.vocab = vocab
         self.vocab_inv = {v: k for k, v in self.vocab.items()}
         self.merges = merges
+        # Create a dictionary for O(1) merge lookups
+        self.merge_ranks = {pair: idx for idx, pair in enumerate(merges)}
         self.special_tokens = special_tokens or []
         if self.special_tokens:
             sorted_special_tokens = sorted(self.special_tokens, key=len, reverse=True)
@@ -77,14 +79,34 @@ class BPETokenizer:
         return tokens
     
     def _bpe_merge_token(self, token: tuple[bytes]):
+        if len(token) <= 1:
+            return token
+            
         token = list(token)
-        for merge in self.merges:
-            i = 0
-            while i < len(token) - 1:
-                if token[i] == merge[0] and token[i+1] == merge[1]:
-                    token[i] = token[i] + token[i+1]
-                    token.pop(i+1)
-                i += 1
+        
+        # Apply merges in order until no more merges can be applied
+        while True:
+            pairs = [(token[i], token[i+1]) for i in range(len(token) - 1)]
+            
+            # Find the earliest merge that can be applied using O(1) lookup
+            best_merge_rank = None
+            best_pair_idx = None
+            
+            for pair_idx, pair in enumerate(pairs):
+                if pair in self.merge_ranks:
+                    merge_rank = self.merge_ranks[pair]
+                    if best_merge_rank is None or merge_rank < best_merge_rank:
+                        best_merge_rank = merge_rank
+                        best_pair_idx = pair_idx
+            
+            # If no merge found, we're done
+            if best_merge_rank is None:
+                break
+                
+            # Apply the best merge
+            token[best_pair_idx] = token[best_pair_idx] + token[best_pair_idx + 1]
+            token.pop(best_pair_idx + 1)
+        
         return tuple(token)
 
     def encode(self, text: str) -> list[int]:

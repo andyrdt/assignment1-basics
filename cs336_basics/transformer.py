@@ -18,10 +18,11 @@ class Linear(torch.nn.Module):
         self.weight = torch.nn.Parameter(
             torch.empty((out_features, in_features), device=device, dtype=dtype)
         )
+        std = 2/(self.weight.shape[0] + self.weight.shape[1])
         torch.nn.init.trunc_normal_(
             tensor=self.weight,
-            mean=0, std=2/(self.weight.shape[0] + self.weight.shape[1]),
-            a=-3, b=3,
+            mean=0, std=std,
+            a=-3*std, b=3*std,
         )
     
     def forward(self, x: Float[Tensor, '... d_in']) -> Float[Tensor, '... d_out']:
@@ -147,8 +148,8 @@ class RotaryPositionalEmbedding(torch.nn.Module):
         sin = einops.repeat(torch.sin(thetas), 'seq d_k_2 -> seq (d_k_2 2)') # seq d_k
         cos = einops.repeat(torch.cos(thetas), 'seq d_k_2 -> seq (d_k_2 2)') # seq d_k
 
-        self.register_buffer('sin', sin, persistent=False)
-        self.register_buffer('cos', cos, persistent=False)
+        self.register_buffer('sin', sin.to(dtype=self.dtype, device=self.device), persistent=False)
+        self.register_buffer('cos', cos.to(dtype=self.dtype, device=self.device), persistent=False)
     
     @staticmethod
     def _get_flipped_pairs(x: Float[Tensor, '... d_k']):
@@ -229,7 +230,7 @@ class MultiHeadSelfAttention(torch.nn.Module):
             k = self.rope(k, token_positions)
 
         seq = x.shape[-2]
-        mask = torch.tril(torch.ones((seq, seq))).bool().to(device=x.device)
+        mask = torch.tril(torch.ones((seq, seq))).bool().to(device=q.device)
         weighted_v = scaled_dot_product_attention(q, k, v, mask) # ... num_heads seq d_head
         weighted_v = einops.rearrange(weighted_v, '... batch num_heads seq d_head -> ... batch seq (num_heads d_head)', num_heads=self.num_heads, d_head=self.d_head)
 
@@ -261,8 +262,8 @@ class TransformerBlock(torch.nn.Module):
         token_positions: Int[Tensor, '... seq']
     ) -> Float[Tensor, '... seq d_model']:
         
-        x += self.attn(self.ln1(x), token_positions)
-        x += self.ffn(self.ln2(x))
+        x = x + self.attn(self.ln1(x), token_positions)
+        x = x + self.ffn(self.ln2(x))
 
         return x
 
@@ -283,10 +284,13 @@ class TransformerLM(torch.nn.Module):
         
         super().__init__()
 
+        self.device = device
+        self.dtype = dtype
+
         self.token_embeddings = Embedding(num_embeddings=vocab_size, embedding_dim=d_model, device=device, dtype=dtype)
 
         d_k = d_model // num_heads
-        self.rope = RotaryPositionalEmbedding(theta=rope_theta, d_k=d_k, max_seq_len=context_length, device=device)
+        self.rope = RotaryPositionalEmbedding(theta=rope_theta, d_k=d_k, max_seq_len=context_length, device=device, dtype=dtype)
 
         self.layers = torch.nn.ModuleList(
             [
@@ -309,8 +313,3 @@ class TransformerLM(torch.nn.Module):
         logits = self.lm_head(self.ln_final(x))
 
         return logits
-
-
-
-
-

@@ -19,6 +19,8 @@ dependencies = [
     "tqdm>=4.67.1",
     "wandb>=0.19.7",
     "scalene>=1.5.51",
+    "ipykernel>=6.29.5",
+    "matplotlib>=3.10.3",
 ]
 
 

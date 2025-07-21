@@ -5,6 +5,9 @@ import cProfile
 import pstats
 from cs336_basics.train_bpe import train_bpe
 from tests.common import gpt2_bytes_to_unicode
+from cs336_basics.bpe_tokenizer import BPETokenizer
+import numpy as np
+import tqdm
 
 
 def main():
@@ -16,6 +19,9 @@ def main():
             'special_tokens': ['<|endoftext|>'],
             'output_dir': 'results/tinystories',
             'num_processes': 8,
+            'train_path': 'data/TinyStoriesV2-GPT4-train.txt',
+            'valid_path': 'data/TinyStoriesV2-GPT4-valid.txt',
+            'dataset_name': 'TinyStoriesV2-GPT4'
         },
         'owt': {
             'input_path': 'data/owt_train.txt',
@@ -23,6 +29,9 @@ def main():
             'special_tokens': ['<|endoftext|>'],
             'output_dir': 'results/owt',
             'num_processes': 8,
+            'train_path': 'data/owt_train.txt',
+            'valid_path': 'data/owt_valid.txt',
+            'dataset_name': 'owt'
         }
     }
     
@@ -121,6 +130,48 @@ def main():
     # Print vocabulary statistics
     print_vocab_statistics(vocab, config['special_tokens'])
 
+    # Now begin pretokenizing the dataset
+    tokenizer = BPETokenizer.from_files(vocab_filepath=vocab_path, merges_filepath=merges_path, special_tokens=config['special_tokens'])
+
+    with open(config['train_path'], 'r') as f_in:
+        encoded_dataset_train_iterable = tokenizer.encode_iterable(f_in)
+        encoded_dataset_train = []
+        for encoded_token in tqdm.tqdm(encoded_dataset_train_iterable):
+            encoded_dataset_train.append(encoded_token)
+        with open(config['output_dir'] + '/' + 'train.npy', 'wb') as f_out:
+            np.save(f_out, np.array(encoded_dataset_train, dtype=np.uint16))
+            print(f"Encoded dataset train saved to: {config['output_dir'] + '/' + 'train.npy'}") 
+
+    with open(config['valid_path'], 'r') as f_in:
+        encoded_dataset_valid_iterable = tokenizer.encode_iterable(f_in)
+        encoded_dataset_valid = []
+        for encoded_token in tqdm.tqdm(encoded_dataset_valid_iterable):
+            encoded_dataset_valid.append(encoded_token)
+        with open(config['output_dir'] + '/' + 'valid.npy', 'wb') as f_out:
+            np.save(f_out, np.array(encoded_dataset_valid, dtype=np.uint16))
+            print(f"Encoded dataset valid saved to: {config['output_dir'] + '/' + 'valid.npy'}")
+
+    # sanity check: load the dataset
+    with open(config['train_path'], 'r') as f_in:
+        # Read first few lines for comparison
+        first_lines = [f_in.readline() for _ in range(3)]  # Read first 3 lines
+        original_text = ''.join(first_lines)
+        print(f"Original train: {repr(original_text[:200])}")
+        
+    encoded_dataset_train = np.load(config['output_dir'] + '/' + 'train.npy', mmap_mode='r')
+    # print(f"Encoded dataset train: {encoded_dataset_train[:128]}")
+    print(f"Decoded dataset train: {tokenizer.decode(encoded_dataset_train[:128])}")
+
+    # sanity check: load the dataset
+    with open(config['valid_path'], 'r') as f_in:
+        # Read first few lines for comparison
+        first_lines = [f_in.readline() for _ in range(3)]  # Read first 3 lines
+        original_text = ''.join(first_lines)
+        print(f"Original valid: {repr(original_text[:200])}")
+        
+    encoded_dataset_valid = np.load(config['output_dir'] + '/' + 'valid.npy', mmap_mode='r')
+    # print(f"Encoded dataset valid: {encoded_dataset_valid[:128]}")
+    print(f"Decoded dataset valid: {tokenizer.decode(encoded_dataset_valid[:128])}")
 
 def print_longest_tokens(vocab_serialized: dict, top_n: int = 20):
     """Print the longest tokens in the vocabulary."""
